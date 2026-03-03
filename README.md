@@ -33,6 +33,27 @@ The script re-applies the known-good fixes without changing your routing logic, 
 - node selection
 - your OpenVPN server/certificate settings
 
+## One-Line Install
+
+For a fresh router or after a package update, SSH into the router and run this single command:
+
+```sh
+wget -O- https://raw.githubusercontent.com/Recoba86/openwrt-passwall-openvpn-fix/main/install.sh | sh
+```
+
+That command will:
+
+- download the main fix script to `/root/passwall-openvpn-fix.sh`
+- make it executable
+- run it immediately
+- restart `openvpn` and `passwall2` by default
+
+If you want to apply the files without restarting services immediately:
+
+```sh
+RESTART_SERVICES=0 wget -O- https://raw.githubusercontent.com/Recoba86/openwrt-passwall-openvpn-fix/main/install.sh | sh
+```
+
 ## Usage
 
 Copy the script to the router and run it as `root`.
