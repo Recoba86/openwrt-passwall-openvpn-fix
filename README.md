@@ -13,6 +13,7 @@ The script re-applies the known-good fixes without changing your routing logic, 
 ## What It Changes
 
 - Ensures the OpenVPN profile keeps:
+  - `auth-user-pass /etc/openvpn/Yashar.auth`
   - `route-nopull`
   - `pull-filter ignore "redirect-gateway"`
   - `auth-nocache`
@@ -78,6 +79,7 @@ If your OpenVPN profile name or interface names differ, override them with envir
 ```sh
 OPENVPN_SECTION=MyVPN \
 OPENVPN_CONFIG=/etc/openvpn/MyVPN.ovpn \
+OPENVPN_AUTH_FILE=/etc/openvpn/MyVPN.auth \
 NETWORK_IFACE=ovpn0 \
 NETWORK_DEVICE=tun0 \
 RESTART_SERVICES=1 \

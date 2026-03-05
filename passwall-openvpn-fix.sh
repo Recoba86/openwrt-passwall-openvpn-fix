@@ -7,6 +7,8 @@ LOG_PREFIX="[${SCRIPT_NAME}]"
 
 OPENVPN_SECTION="${OPENVPN_SECTION:-Yashar}"
 OPENVPN_CONFIG="${OPENVPN_CONFIG:-/etc/openvpn/${OPENVPN_SECTION}.ovpn}"
+OPENVPN_AUTH_FILE="${OPENVPN_AUTH_FILE:-/etc/openvpn/${OPENVPN_SECTION}.auth}"
+OPENVPN_USERPASS_FALLBACK="${OPENVPN_USERPASS_FALLBACK:-/etc/openvpn/${OPENVPN_SECTION}.userpass}"
 NETWORK_IFACE="${NETWORK_IFACE:-ovpn0}"
 NETWORK_DEVICE="${NETWORK_DEVICE:-tun0}"
 PASSWALL_PACKAGE="${PASSWALL_PACKAGE:-passwall2}"
@@ -65,8 +67,41 @@ ensure_openvpn_line() {
   log "added to ${OPENVPN_CONFIG}: ${line}"
 }
 
+ensure_openvpn_auth_source() {
+  if [ ! -s "${OPENVPN_AUTH_FILE}" ]; then
+    if [ -s "${OPENVPN_USERPASS_FALLBACK}" ]; then
+      cp "${OPENVPN_USERPASS_FALLBACK}" "${OPENVPN_AUTH_FILE}"
+      chmod 600 "${OPENVPN_AUTH_FILE}"
+      CHANGED=1
+      log "created ${OPENVPN_AUTH_FILE} from ${OPENVPN_USERPASS_FALLBACK}"
+    else
+      fail "missing credential file: ${OPENVPN_AUTH_FILE}"
+    fi
+  fi
+
+  if grep -q '^auth-user-pass ' "${OPENVPN_CONFIG}" 2>/dev/null; then
+    if ! grep -q "^auth-user-pass ${OPENVPN_AUTH_FILE}\$" "${OPENVPN_CONFIG}" 2>/dev/null; then
+      backup_file "${OPENVPN_CONFIG}"
+      sed -i "s#^auth-user-pass .*#auth-user-pass ${OPENVPN_AUTH_FILE}#" "${OPENVPN_CONFIG}"
+      CHANGED=1
+      log "set auth-user-pass source to ${OPENVPN_AUTH_FILE}"
+    fi
+  elif grep -q '^auth-user-pass$' "${OPENVPN_CONFIG}" 2>/dev/null; then
+    backup_file "${OPENVPN_CONFIG}"
+    sed -i "s#^auth-user-pass\$#auth-user-pass ${OPENVPN_AUTH_FILE}#" "${OPENVPN_CONFIG}"
+    CHANGED=1
+    log "set auth-user-pass source to ${OPENVPN_AUTH_FILE}"
+  else
+    backup_file "${OPENVPN_CONFIG}"
+    printf '\nauth-user-pass %s\n' "${OPENVPN_AUTH_FILE}" >> "${OPENVPN_CONFIG}"
+    CHANGED=1
+    log "added auth-user-pass source ${OPENVPN_AUTH_FILE}"
+  fi
+}
+
 ensure_openvpn_profile() {
   [ -f "${OPENVPN_CONFIG}" ] || fail "OpenVPN config not found: ${OPENVPN_CONFIG}"
+  ensure_openvpn_auth_source
   if ! grep -Fqx 'route-nopull' "${OPENVPN_CONFIG}" 2>/dev/null || \
      ! grep -Fqx 'pull-filter ignore "redirect-gateway"' "${OPENVPN_CONFIG}" 2>/dev/null || \
      ! grep -Fqx 'auth-nocache' "${OPENVPN_CONFIG}" 2>/dev/null; then
