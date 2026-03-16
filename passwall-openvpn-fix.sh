@@ -160,13 +160,6 @@ detect_openvpn_section() {
     return 0
   fi
 
-  for config_path in /etc/openvpn/*.ovpn; do
-    [ -f "${config_path}" ] || continue
-    PRIMARY_OPENVPN_SECTION="$(basename "${config_path}" .ovpn)"
-    PRIMARY_OPENVPN_CONFIG="${config_path}"
-    return 0
-  done
-
   fail "could not detect an OpenVPN instance; set OPENVPN_SECTION or OPENVPN_CONFIG explicitly"
 }
 
