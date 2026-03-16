@@ -1,0 +1,17 @@
+.DS_Store
+
+# Local tooling / scratch work
+bruteForce/
+
+# VPN secrets and imported profiles
+*.ovpn
+*.auth
+*.userpass
+*.keypass
+*.pem
+*.crt
+*.key
+
+# Temporary runtime files
+*.tmp
+*.bak.*
