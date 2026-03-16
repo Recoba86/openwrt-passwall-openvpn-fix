@@ -14,7 +14,7 @@ The script auto-detects the running OpenVPN instance first, then enabled LuCI/UC
 
 - Ensures the OpenVPN profile keeps:
   - `auth-user-pass /etc/openvpn/<profile>.auth`
-  - `askpass /etc/openvpn/<profile>.keypass` when the private key is encrypted
+  - `askpass /etc/openvpn/<profile>.keypass` only when the private key is encrypted
   - `route-nopull`
   - `pull-filter ignore "redirect-gateway"`
   - `auth-nocache`
@@ -88,6 +88,14 @@ ssh root@192.168.10.1 'sh /root/passwall-openvpn-fix.sh --dry-run'
 ```
 
 If the tunnel is currently down and the router has no existing `network.<iface>.device` binding yet, dry-run will report that it cannot preview the final network rebinding until a live tunnel exists or `NETWORK_DEVICE` is provided explicitly.
+
+If you imported a raw `.ovpn` file that is not registered in LuCI/UCI yet, you can point the script at it directly:
+
+```sh
+OPENVPN_CONFIG=/etc/openvpn/Salem.ovpn sh /root/passwall-openvpn-fix.sh
+```
+
+For a profile that only uses username/password and does not use an encrypted private key, the script will keep `auth-user-pass` handling and will not add `askpass`.
 
 ## Customization
 
