@@ -5,12 +5,12 @@ set -eu
 SCRIPT_NAME="${0##*/}"
 LOG_PREFIX="[${SCRIPT_NAME}]"
 
-OPENVPN_SECTION="${OPENVPN_SECTION:-Yashar}"
-OPENVPN_CONFIG="${OPENVPN_CONFIG:-/etc/openvpn/${OPENVPN_SECTION}.ovpn}"
-OPENVPN_AUTH_FILE="${OPENVPN_AUTH_FILE:-/etc/openvpn/${OPENVPN_SECTION}.auth}"
-OPENVPN_USERPASS_FALLBACK="${OPENVPN_USERPASS_FALLBACK:-/etc/openvpn/${OPENVPN_SECTION}.userpass}"
-NETWORK_IFACE="${NETWORK_IFACE:-ovpn0}"
-NETWORK_DEVICE="${NETWORK_DEVICE:-tun0}"
+OPENVPN_SECTION="${OPENVPN_SECTION:-}"
+OPENVPN_CONFIG="${OPENVPN_CONFIG:-}"
+OPENVPN_AUTH_FILE="${OPENVPN_AUTH_FILE:-}"
+OPENVPN_USERPASS_FALLBACK="${OPENVPN_USERPASS_FALLBACK:-}"
+NETWORK_IFACE="${NETWORK_IFACE:-}"
+NETWORK_DEVICE="${NETWORK_DEVICE:-}"
 PASSWALL_PACKAGE="${PASSWALL_PACKAGE:-passwall2}"
 PASSWALL_XRAY_LUA="${PASSWALL_XRAY_LUA:-/usr/lib/lua/luci/passwall2/util_xray.lua}"
 PASSWALL_XRAY_BIN="${PASSWALL_XRAY_BIN:-/usr/bin/xray}"
@@ -18,6 +18,7 @@ RESTART_SERVICES="${RESTART_SERVICES:-0}"
 
 CHANGED=0
 BACKED_UP_FILES=""
+PASSWALL_IFACES=""
 
 log() {
   printf '%s %s\n' "${LOG_PREFIX}" "$*"
@@ -34,6 +35,25 @@ require_root() {
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
+}
+
+list_uci_sections() {
+  package_name="$1"
+  type_name="$2"
+  uci show "${package_name}" 2>/dev/null | awk -F'[.=]' -v expected="${type_name}" '$3 == expected {print $2}'
+}
+
+append_unique_word() {
+  current_list="$1"
+  new_word="$2"
+  [ -n "${new_word}" ] || {
+    printf '%s\n' "${current_list}"
+    return 0
+  }
+  case " ${current_list} " in
+    *" ${new_word} "*) printf '%s\n' "${current_list}" ;;
+    *) printf '%s %s\n' "${current_list}" "${new_word}" | awk '{$1=$1; print}' ;;
+  esac
 }
 
 backup_file() {
@@ -57,6 +77,155 @@ set_uci_value() {
     CHANGED=1
     log "set ${key}='${expected}'"
   fi
+}
+
+detect_openvpn_section() {
+  [ -n "${OPENVPN_SECTION}" ] && return 0
+
+  running_section="$(ps w 2>/dev/null | sed -n 's/.*openvpn(\([^)]*\)).*/\1/p' | head -n 1)"
+  if [ -n "${running_section}" ]; then
+    config_value="$(uci -q get "openvpn.${running_section}.config" 2>/dev/null || true)"
+    if [ -n "${config_value}" ] && [ -f "${config_value}" ]; then
+      OPENVPN_SECTION="${running_section}"
+      return 0
+    fi
+  fi
+
+  for section_name in $(list_uci_sections openvpn openvpn); do
+    enabled_value="$(uci -q get "openvpn.${section_name}.enabled" 2>/dev/null || echo 0)"
+    config_value="$(uci -q get "openvpn.${section_name}.config" 2>/dev/null || true)"
+    if [ "${enabled_value}" = "1" ] && [ -n "${config_value}" ] && [ -f "${config_value}" ]; then
+      OPENVPN_SECTION="${section_name}"
+      return 0
+    fi
+  done
+
+  for section_name in $(list_uci_sections openvpn openvpn); do
+    config_value="$(uci -q get "openvpn.${section_name}.config" 2>/dev/null || true)"
+    if [ -n "${config_value}" ] && [ -f "${config_value}" ]; then
+      OPENVPN_SECTION="${section_name}"
+      return 0
+    fi
+  done
+
+  fail "could not detect an OpenVPN instance; set OPENVPN_SECTION explicitly"
+}
+
+detect_openvpn_config() {
+  [ -n "${OPENVPN_CONFIG}" ] && return 0
+
+  config_value="$(uci -q get "openvpn.${OPENVPN_SECTION}.config" 2>/dev/null || true)"
+  if [ -n "${config_value}" ]; then
+    OPENVPN_CONFIG="${config_value}"
+  else
+    OPENVPN_CONFIG="/etc/openvpn/${OPENVPN_SECTION}.ovpn"
+  fi
+}
+
+detect_openvpn_auth_source() {
+  [ -n "${OPENVPN_AUTH_FILE}" ] && return 0
+
+  auth_path="$(awk '/^auth-user-pass[[:space:]]+/ {print $2; exit}' "${OPENVPN_CONFIG}" 2>/dev/null || true)"
+  if [ -n "${auth_path}" ]; then
+    OPENVPN_AUTH_FILE="${auth_path}"
+    return 0
+  fi
+
+  config_dir="$(dirname "${OPENVPN_CONFIG}")"
+  config_base="$(basename "${OPENVPN_CONFIG}" .ovpn)"
+  OPENVPN_AUTH_FILE="${config_dir}/${config_base}.auth"
+}
+
+detect_openvpn_userpass_fallback() {
+  [ -n "${OPENVPN_USERPASS_FALLBACK}" ] && return 0
+
+  config_dir="$(dirname "${OPENVPN_CONFIG}")"
+  config_base="$(basename "${OPENVPN_CONFIG}" .ovpn)"
+  auth_dir="$(dirname "${OPENVPN_AUTH_FILE}")"
+  auth_base="$(basename "${OPENVPN_AUTH_FILE}")"
+  auth_stem="${auth_base%.*}"
+
+  for candidate in \
+    "${config_dir}/${config_base}.userpass" \
+    "${auth_dir}/${auth_stem}.userpass" \
+    "/etc/openvpn/${OPENVPN_SECTION}.userpass"
+  do
+    if [ -f "${candidate}" ]; then
+      OPENVPN_USERPASS_FALLBACK="${candidate}"
+      return 0
+    fi
+  done
+
+  OPENVPN_USERPASS_FALLBACK="${config_dir}/${config_base}.userpass"
+}
+
+detect_network_device() {
+  [ -n "${NETWORK_DEVICE}" ] && return 0
+
+  active_device="$(ip -brief addr show 2>/dev/null | awk '$1 ~ /^(tun|tap)[0-9]+$/ {print $1; exit}')"
+  if [ -n "${active_device}" ]; then
+    NETWORK_DEVICE="${active_device}"
+    return 0
+  fi
+
+  config_dev="$(awk '/^dev[[:space:]]+/ {print $2; exit}' "${OPENVPN_CONFIG}" 2>/dev/null || true)"
+  case "${config_dev}" in
+    tap|tap*) NETWORK_DEVICE="tap0" ;;
+    ""|tun|tun*) NETWORK_DEVICE="tun0" ;;
+    *) NETWORK_DEVICE="${config_dev}" ;;
+  esac
+}
+
+detect_passwall_ifaces() {
+  PASSWALL_IFACES=""
+  for node_id in $(list_uci_sections "${PASSWALL_PACKAGE}" nodes); do
+    protocol_value="$(uci -q get "${PASSWALL_PACKAGE}.${node_id}.protocol" 2>/dev/null || true)"
+    iface_value="$(uci -q get "${PASSWALL_PACKAGE}.${node_id}.iface" 2>/dev/null || true)"
+    if [ "${protocol_value}" = "_iface" ] && [ -n "${iface_value}" ]; then
+      PASSWALL_IFACES="$(append_unique_word "${PASSWALL_IFACES}" "${iface_value}")"
+    fi
+  done
+}
+
+detect_network_iface() {
+  if [ -n "${NETWORK_IFACE}" ]; then
+    PASSWALL_IFACES="$(append_unique_word "${PASSWALL_IFACES}" "${NETWORK_IFACE}")"
+    return 0
+  fi
+
+  if [ -n "${PASSWALL_IFACES}" ]; then
+    NETWORK_IFACE="$(printf '%s\n' "${PASSWALL_IFACES}" | awk '{print $1}')"
+    return 0
+  fi
+
+  for iface_name in $(list_uci_sections network interface); do
+    device_value="$(uci -q get "network.${iface_name}.device" 2>/dev/null || true)"
+    if [ "${device_value}" = "${NETWORK_DEVICE}" ]; then
+      NETWORK_IFACE="${iface_name}"
+      PASSWALL_IFACES="$(append_unique_word "${PASSWALL_IFACES}" "${iface_name}")"
+      return 0
+    fi
+  done
+
+  NETWORK_IFACE="${OPENVPN_SECTION}"
+  PASSWALL_IFACES="$(append_unique_word "${PASSWALL_IFACES}" "${NETWORK_IFACE}")"
+}
+
+resolve_context() {
+  detect_openvpn_section
+  detect_openvpn_config
+  [ -f "${OPENVPN_CONFIG}" ] || fail "OpenVPN config not found: ${OPENVPN_CONFIG}"
+  detect_openvpn_auth_source
+  detect_openvpn_userpass_fallback
+  detect_network_device
+  detect_passwall_ifaces
+  detect_network_iface
+
+  log "detected OpenVPN section: ${OPENVPN_SECTION}"
+  log "detected OpenVPN config: ${OPENVPN_CONFIG}"
+  log "detected auth file: ${OPENVPN_AUTH_FILE}"
+  log "detected tunnel device: ${NETWORK_DEVICE}"
+  log "detected network iface(s): ${PASSWALL_IFACES}"
 }
 
 ensure_openvpn_line() {
@@ -100,7 +269,6 @@ ensure_openvpn_auth_source() {
 }
 
 ensure_openvpn_profile() {
-  [ -f "${OPENVPN_CONFIG}" ] || fail "OpenVPN config not found: ${OPENVPN_CONFIG}"
   ensure_openvpn_auth_source
   if ! grep -Fqx 'route-nopull' "${OPENVPN_CONFIG}" 2>/dev/null || \
      ! grep -Fqx 'pull-filter ignore "redirect-gateway"' "${OPENVPN_CONFIG}" 2>/dev/null || \
@@ -122,14 +290,16 @@ ensure_openvpn_profile() {
 }
 
 ensure_network_binding() {
-  if ! uci -q get "network.${NETWORK_IFACE}" >/dev/null 2>&1; then
-    uci set "network.${NETWORK_IFACE}=interface"
-    CHANGED=1
-    log "created network interface section: ${NETWORK_IFACE}"
-  fi
+  for iface_name in ${PASSWALL_IFACES}; do
+    if ! uci -q get "network.${iface_name}" >/dev/null 2>&1; then
+      uci set "network.${iface_name}=interface"
+      CHANGED=1
+      log "created network interface section: ${iface_name}"
+    fi
 
-  set_uci_value "network.${NETWORK_IFACE}.proto" "none"
-  set_uci_value "network.${NETWORK_IFACE}.device" "${NETWORK_DEVICE}"
+    set_uci_value "network.${iface_name}.proto" "none"
+    set_uci_value "network.${iface_name}.device" "${NETWORK_DEVICE}"
+  done
 }
 
 ensure_passwall_paths() {
@@ -253,6 +423,7 @@ main() {
   require_cmd cp
   require_cmd mv
 
+  resolve_context
   ensure_openvpn_profile
   ensure_network_binding
   ensure_passwall_paths

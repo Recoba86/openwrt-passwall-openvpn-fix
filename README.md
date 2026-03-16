@@ -2,24 +2,24 @@
 
 This project contains an idempotent OpenWrt shell script that re-applies the runtime fixes needed for Passwall2 to work correctly with an OpenVPN outbound interface.
 
-It is designed for the exact issue we diagnosed on your router:
+It is designed for the exact issue we diagnosed on OpenWrt routers that use Passwall2 with an OpenVPN interface outbound:
 
-- Passwall2 stores the logical OpenWrt interface name (`ovpn0`)
-- Xray and nftables need the real kernel device name (`tun0`)
+- Passwall2 stores a logical OpenWrt interface name
+- Xray and nftables need the real kernel device name
 - after package updates, the patched Passwall2 generator can be overwritten
 
-The script re-applies the known-good fixes without changing your routing logic, shunt logic, domain policy, or outbound selection.
+The script auto-detects the running OpenVPN instance first, then enabled profiles, then falls back to the first usable profile. It also detects the config file, auth file path, tunnel device, and the Passwall `_iface` logical interface names. It re-applies the known-good fixes without changing your routing logic, shunt logic, domain policy, or outbound selection.
 
 ## What It Changes
 
 - Ensures the OpenVPN profile keeps:
-  - `auth-user-pass /etc/openvpn/Yashar.auth`
+  - `auth-user-pass /etc/openvpn/<profile>.auth`
   - `route-nopull`
   - `pull-filter ignore "redirect-gateway"`
   - `auth-nocache`
 - Ensures OpenWrt has:
-  - `network.ovpn0.proto='none'`
-  - `network.ovpn0.device='tun0'`
+  - `network.<passwall-iface>.proto='none'`
+  - `network.<passwall-iface>.device='<detected tun/tap device>'`
 - Ensures Passwall2 uses:
   - `passwall2.@global_app[0].xray_file='/usr/bin/xray'`
 - Patches `util_xray.lua` so Passwall2 resolves logical interface names to real device names before generating:
@@ -74,12 +74,13 @@ ssh root@192.168.10.1 'RESTART_SERVICES=1 sh /root/passwall-openvpn-fix.sh'
 
 ## Customization
 
-If your OpenVPN profile name or interface names differ, override them with environment variables:
+The script is meant to work without manual edits, but you can still override detection with environment variables when needed:
 
 ```sh
 OPENVPN_SECTION=MyVPN \
 OPENVPN_CONFIG=/etc/openvpn/MyVPN.ovpn \
 OPENVPN_AUTH_FILE=/etc/openvpn/MyVPN.auth \
+OPENVPN_USERPASS_FALLBACK=/etc/openvpn/MyVPN.userpass \
 NETWORK_IFACE=ovpn0 \
 NETWORK_DEVICE=tun0 \
 RESTART_SERVICES=1 \
