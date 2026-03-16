@@ -19,6 +19,11 @@ RESTART_SERVICES="${RESTART_SERVICES:-0}"
 CHANGED=0
 BACKED_UP_FILES=""
 PASSWALL_IFACES=""
+PRIMARY_OPENVPN_SECTION=""
+PRIMARY_OPENVPN_CONFIG=""
+PRIMARY_OPENVPN_AUTH_FILE=""
+PRIMARY_OPENVPN_USERPASS_FALLBACK=""
+PRIMARY_OPENVPN_KEYPASS_FILE=""
 
 log() {
   printf '%s %s\n' "${LOG_PREFIX}" "$*"
@@ -80,13 +85,15 @@ set_uci_value() {
 }
 
 detect_openvpn_section() {
-  [ -n "${OPENVPN_SECTION}" ] && return 0
+  [ -n "${PRIMARY_OPENVPN_SECTION}" ] && return 0
+  [ -n "${OPENVPN_SECTION}" ] && PRIMARY_OPENVPN_SECTION="${OPENVPN_SECTION}"
+  [ -n "${PRIMARY_OPENVPN_SECTION}" ] && return 0
 
   running_section="$(ps w 2>/dev/null | sed -n 's/.*openvpn(\([^)]*\)).*/\1/p' | head -n 1)"
   if [ -n "${running_section}" ]; then
     config_value="$(uci -q get "openvpn.${running_section}.config" 2>/dev/null || true)"
     if [ -n "${config_value}" ] && [ -f "${config_value}" ]; then
-      OPENVPN_SECTION="${running_section}"
+      PRIMARY_OPENVPN_SECTION="${running_section}"
       return 0
     fi
   fi
@@ -95,7 +102,7 @@ detect_openvpn_section() {
     enabled_value="$(uci -q get "openvpn.${section_name}.enabled" 2>/dev/null || echo 0)"
     config_value="$(uci -q get "openvpn.${section_name}.config" 2>/dev/null || true)"
     if [ "${enabled_value}" = "1" ] && [ -n "${config_value}" ] && [ -f "${config_value}" ]; then
-      OPENVPN_SECTION="${section_name}"
+      PRIMARY_OPENVPN_SECTION="${section_name}"
       return 0
     fi
   done
@@ -103,60 +110,71 @@ detect_openvpn_section() {
   for section_name in $(list_uci_sections openvpn openvpn); do
     config_value="$(uci -q get "openvpn.${section_name}.config" 2>/dev/null || true)"
     if [ -n "${config_value}" ] && [ -f "${config_value}" ]; then
-      OPENVPN_SECTION="${section_name}"
+      PRIMARY_OPENVPN_SECTION="${section_name}"
       return 0
     fi
   done
 
-  fail "could not detect an OpenVPN instance; set OPENVPN_SECTION explicitly"
+  if [ -n "${OPENVPN_CONFIG}" ] && [ -f "${OPENVPN_CONFIG}" ]; then
+    PRIMARY_OPENVPN_SECTION="$(basename "${OPENVPN_CONFIG}" .ovpn)"
+    return 0
+  fi
+
+  fail "could not detect an OpenVPN instance; set OPENVPN_SECTION or OPENVPN_CONFIG explicitly"
 }
 
 detect_openvpn_config() {
-  [ -n "${OPENVPN_CONFIG}" ] && return 0
+  [ -n "${PRIMARY_OPENVPN_CONFIG}" ] && return 0
+  [ -n "${OPENVPN_CONFIG}" ] && PRIMARY_OPENVPN_CONFIG="${OPENVPN_CONFIG}"
+  [ -n "${PRIMARY_OPENVPN_CONFIG}" ] && return 0
 
-  config_value="$(uci -q get "openvpn.${OPENVPN_SECTION}.config" 2>/dev/null || true)"
+  config_value="$(uci -q get "openvpn.${PRIMARY_OPENVPN_SECTION}.config" 2>/dev/null || true)"
   if [ -n "${config_value}" ]; then
-    OPENVPN_CONFIG="${config_value}"
+    PRIMARY_OPENVPN_CONFIG="${config_value}"
   else
-    OPENVPN_CONFIG="/etc/openvpn/${OPENVPN_SECTION}.ovpn"
+    PRIMARY_OPENVPN_CONFIG="/etc/openvpn/${PRIMARY_OPENVPN_SECTION}.ovpn"
   fi
 }
 
 detect_openvpn_auth_source() {
-  [ -n "${OPENVPN_AUTH_FILE}" ] && return 0
+  [ -n "${PRIMARY_OPENVPN_AUTH_FILE}" ] && return 0
+  [ -n "${OPENVPN_AUTH_FILE}" ] && PRIMARY_OPENVPN_AUTH_FILE="${OPENVPN_AUTH_FILE}"
+  [ -n "${PRIMARY_OPENVPN_AUTH_FILE}" ] && return 0
 
-  auth_path="$(awk '/^auth-user-pass[[:space:]]+/ {print $2; exit}' "${OPENVPN_CONFIG}" 2>/dev/null || true)"
+  auth_path="$(awk '/^auth-user-pass[[:space:]]+/ {print $2; exit}' "${PRIMARY_OPENVPN_CONFIG}" 2>/dev/null || true)"
   if [ -n "${auth_path}" ]; then
-    OPENVPN_AUTH_FILE="${auth_path}"
+    PRIMARY_OPENVPN_AUTH_FILE="${auth_path}"
     return 0
   fi
 
-  config_dir="$(dirname "${OPENVPN_CONFIG}")"
-  config_base="$(basename "${OPENVPN_CONFIG}" .ovpn)"
-  OPENVPN_AUTH_FILE="${config_dir}/${config_base}.auth"
+  config_dir="$(dirname "${PRIMARY_OPENVPN_CONFIG}")"
+  config_base="$(basename "${PRIMARY_OPENVPN_CONFIG}" .ovpn)"
+  PRIMARY_OPENVPN_AUTH_FILE="${config_dir}/${config_base}.auth"
 }
 
 detect_openvpn_userpass_fallback() {
-  [ -n "${OPENVPN_USERPASS_FALLBACK}" ] && return 0
+  [ -n "${PRIMARY_OPENVPN_USERPASS_FALLBACK}" ] && return 0
+  [ -n "${OPENVPN_USERPASS_FALLBACK}" ] && PRIMARY_OPENVPN_USERPASS_FALLBACK="${OPENVPN_USERPASS_FALLBACK}"
+  [ -n "${PRIMARY_OPENVPN_USERPASS_FALLBACK}" ] && return 0
 
-  config_dir="$(dirname "${OPENVPN_CONFIG}")"
-  config_base="$(basename "${OPENVPN_CONFIG}" .ovpn)"
-  auth_dir="$(dirname "${OPENVPN_AUTH_FILE}")"
-  auth_base="$(basename "${OPENVPN_AUTH_FILE}")"
+  config_dir="$(dirname "${PRIMARY_OPENVPN_CONFIG}")"
+  config_base="$(basename "${PRIMARY_OPENVPN_CONFIG}" .ovpn)"
+  auth_dir="$(dirname "${PRIMARY_OPENVPN_AUTH_FILE}")"
+  auth_base="$(basename "${PRIMARY_OPENVPN_AUTH_FILE}")"
   auth_stem="${auth_base%.*}"
 
   for candidate in \
     "${config_dir}/${config_base}.userpass" \
     "${auth_dir}/${auth_stem}.userpass" \
-    "/etc/openvpn/${OPENVPN_SECTION}.userpass"
+    "/etc/openvpn/${PRIMARY_OPENVPN_SECTION}.userpass"
   do
     if [ -f "${candidate}" ]; then
-      OPENVPN_USERPASS_FALLBACK="${candidate}"
+      PRIMARY_OPENVPN_USERPASS_FALLBACK="${candidate}"
       return 0
     fi
   done
 
-  OPENVPN_USERPASS_FALLBACK="${config_dir}/${config_base}.userpass"
+  PRIMARY_OPENVPN_USERPASS_FALLBACK="${config_dir}/${config_base}.userpass"
 }
 
 detect_network_device() {
@@ -168,7 +186,7 @@ detect_network_device() {
     return 0
   fi
 
-  config_dev="$(awk '/^dev[[:space:]]+/ {print $2; exit}' "${OPENVPN_CONFIG}" 2>/dev/null || true)"
+  config_dev="$(awk '/^dev[[:space:]]+/ {print $2; exit}' "${PRIMARY_OPENVPN_CONFIG}" 2>/dev/null || true)"
   case "${config_dev}" in
     tap|tap*) NETWORK_DEVICE="tap0" ;;
     ""|tun|tun*) NETWORK_DEVICE="tun0" ;;
@@ -214,79 +232,197 @@ detect_network_iface() {
 resolve_context() {
   detect_openvpn_section
   detect_openvpn_config
-  [ -f "${OPENVPN_CONFIG}" ] || fail "OpenVPN config not found: ${OPENVPN_CONFIG}"
+  [ -f "${PRIMARY_OPENVPN_CONFIG}" ] || fail "OpenVPN config not found: ${PRIMARY_OPENVPN_CONFIG}"
   detect_openvpn_auth_source
   detect_openvpn_userpass_fallback
   detect_network_device
   detect_passwall_ifaces
   detect_network_iface
 
-  log "detected OpenVPN section: ${OPENVPN_SECTION}"
-  log "detected OpenVPN config: ${OPENVPN_CONFIG}"
-  log "detected auth file: ${OPENVPN_AUTH_FILE}"
+  log "detected OpenVPN section: ${PRIMARY_OPENVPN_SECTION}"
+  log "detected OpenVPN config: ${PRIMARY_OPENVPN_CONFIG}"
+  log "detected auth file: ${PRIMARY_OPENVPN_AUTH_FILE}"
   log "detected tunnel device: ${NETWORK_DEVICE}"
   log "detected network iface(s): ${PASSWALL_IFACES}"
 }
 
 ensure_openvpn_line() {
   line="$1"
-  grep -Fqx "${line}" "${OPENVPN_CONFIG}" 2>/dev/null && return 0
-  printf '\n%s\n' "${line}" >> "${OPENVPN_CONFIG}"
+  grep -Fqx "${line}" "${PROFILE_OPENVPN_CONFIG}" 2>/dev/null && return 0
+  printf '\n%s\n' "${line}" >> "${PROFILE_OPENVPN_CONFIG}"
   CHANGED=1
-  log "added to ${OPENVPN_CONFIG}: ${line}"
+  log "added to ${PROFILE_OPENVPN_CONFIG}: ${line}"
 }
 
 ensure_openvpn_auth_source() {
-  if [ ! -s "${OPENVPN_AUTH_FILE}" ]; then
-    if [ -s "${OPENVPN_USERPASS_FALLBACK}" ]; then
-      cp "${OPENVPN_USERPASS_FALLBACK}" "${OPENVPN_AUTH_FILE}"
-      chmod 600 "${OPENVPN_AUTH_FILE}"
+  if [ ! -e "${PROFILE_OPENVPN_AUTH_FILE}" ]; then
+    if [ -s "${PROFILE_OPENVPN_USERPASS_FALLBACK}" ]; then
+      cp "${PROFILE_OPENVPN_USERPASS_FALLBACK}" "${PROFILE_OPENVPN_AUTH_FILE}"
+      chmod 600 "${PROFILE_OPENVPN_AUTH_FILE}"
       CHANGED=1
-      log "created ${OPENVPN_AUTH_FILE} from ${OPENVPN_USERPASS_FALLBACK}"
+      log "created ${PROFILE_OPENVPN_AUTH_FILE} from ${PROFILE_OPENVPN_USERPASS_FALLBACK}"
     else
-      fail "missing credential file: ${OPENVPN_AUTH_FILE}"
+      : > "${PROFILE_OPENVPN_AUTH_FILE}"
+      chmod 600 "${PROFILE_OPENVPN_AUTH_FILE}"
+      CHANGED=1
+      log "created empty auth file ${PROFILE_OPENVPN_AUTH_FILE}"
     fi
   fi
 
-  if grep -q '^auth-user-pass ' "${OPENVPN_CONFIG}" 2>/dev/null; then
-    if ! grep -q "^auth-user-pass ${OPENVPN_AUTH_FILE}\$" "${OPENVPN_CONFIG}" 2>/dev/null; then
-      backup_file "${OPENVPN_CONFIG}"
-      sed -i "s#^auth-user-pass .*#auth-user-pass ${OPENVPN_AUTH_FILE}#" "${OPENVPN_CONFIG}"
+  if grep -q '^auth-user-pass ' "${PROFILE_OPENVPN_CONFIG}" 2>/dev/null; then
+    if ! grep -q "^auth-user-pass ${PROFILE_OPENVPN_AUTH_FILE}\$" "${PROFILE_OPENVPN_CONFIG}" 2>/dev/null; then
+      backup_file "${PROFILE_OPENVPN_CONFIG}"
+      sed -i "s#^auth-user-pass .*#auth-user-pass ${PROFILE_OPENVPN_AUTH_FILE}#" "${PROFILE_OPENVPN_CONFIG}"
       CHANGED=1
-      log "set auth-user-pass source to ${OPENVPN_AUTH_FILE}"
+      log "set auth-user-pass source to ${PROFILE_OPENVPN_AUTH_FILE}"
     fi
-  elif grep -q '^auth-user-pass$' "${OPENVPN_CONFIG}" 2>/dev/null; then
-    backup_file "${OPENVPN_CONFIG}"
-    sed -i "s#^auth-user-pass\$#auth-user-pass ${OPENVPN_AUTH_FILE}#" "${OPENVPN_CONFIG}"
+  elif grep -q '^auth-user-pass$' "${PROFILE_OPENVPN_CONFIG}" 2>/dev/null; then
+    backup_file "${PROFILE_OPENVPN_CONFIG}"
+    sed -i "s#^auth-user-pass\$#auth-user-pass ${PROFILE_OPENVPN_AUTH_FILE}#" "${PROFILE_OPENVPN_CONFIG}"
     CHANGED=1
-    log "set auth-user-pass source to ${OPENVPN_AUTH_FILE}"
+    log "set auth-user-pass source to ${PROFILE_OPENVPN_AUTH_FILE}"
   else
-    backup_file "${OPENVPN_CONFIG}"
-    printf '\nauth-user-pass %s\n' "${OPENVPN_AUTH_FILE}" >> "${OPENVPN_CONFIG}"
+    backup_file "${PROFILE_OPENVPN_CONFIG}"
+    printf '\nauth-user-pass %s\n' "${PROFILE_OPENVPN_AUTH_FILE}" >> "${PROFILE_OPENVPN_CONFIG}"
     CHANGED=1
-    log "added auth-user-pass source ${OPENVPN_AUTH_FILE}"
+    log "added auth-user-pass source ${PROFILE_OPENVPN_AUTH_FILE}"
+  fi
+}
+
+ensure_openvpn_keypass_source() {
+  if ! grep -q 'BEGIN ENCRYPTED PRIVATE KEY' "${PROFILE_OPENVPN_CONFIG}" 2>/dev/null; then
+    return 0
+  fi
+
+  if [ ! -e "${PROFILE_OPENVPN_KEYPASS_FILE}" ] && [ -s "${PROFILE_OPENVPN_KEYPASS_FALLBACK}" ]; then
+    cp "${PROFILE_OPENVPN_KEYPASS_FALLBACK}" "${PROFILE_OPENVPN_KEYPASS_FILE}"
+    chmod 600 "${PROFILE_OPENVPN_KEYPASS_FILE}"
+    CHANGED=1
+    log "created ${PROFILE_OPENVPN_KEYPASS_FILE} from ${PROFILE_OPENVPN_KEYPASS_FALLBACK}"
+  fi
+
+  if [ ! -e "${PROFILE_OPENVPN_KEYPASS_FILE}" ]; then
+    : > "${PROFILE_OPENVPN_KEYPASS_FILE}"
+    chmod 600 "${PROFILE_OPENVPN_KEYPASS_FILE}"
+    CHANGED=1
+    log "created empty keypass file ${PROFILE_OPENVPN_KEYPASS_FILE}"
+  fi
+
+  if grep -q '^askpass ' "${PROFILE_OPENVPN_CONFIG}" 2>/dev/null; then
+    if ! grep -q "^askpass ${PROFILE_OPENVPN_KEYPASS_FILE}\$" "${PROFILE_OPENVPN_CONFIG}" 2>/dev/null; then
+      backup_file "${PROFILE_OPENVPN_CONFIG}"
+      sed -i "s#^askpass .*#askpass ${PROFILE_OPENVPN_KEYPASS_FILE}#" "${PROFILE_OPENVPN_CONFIG}"
+      CHANGED=1
+      log "set askpass source to ${PROFILE_OPENVPN_KEYPASS_FILE}"
+    fi
+  elif grep -q '^askpass$' "${PROFILE_OPENVPN_CONFIG}" 2>/dev/null; then
+    backup_file "${PROFILE_OPENVPN_CONFIG}"
+    sed -i "s#^askpass\$#askpass ${PROFILE_OPENVPN_KEYPASS_FILE}#" "${PROFILE_OPENVPN_CONFIG}"
+    CHANGED=1
+    log "set askpass source to ${PROFILE_OPENVPN_KEYPASS_FILE}"
+  else
+    backup_file "${PROFILE_OPENVPN_CONFIG}"
+    printf '\naskpass %s\n' "${PROFILE_OPENVPN_KEYPASS_FILE}" >> "${PROFILE_OPENVPN_CONFIG}"
+    CHANGED=1
+    log "added askpass source ${PROFILE_OPENVPN_KEYPASS_FILE}"
   fi
 }
 
 ensure_openvpn_profile() {
   ensure_openvpn_auth_source
-  if ! grep -Fqx 'route-nopull' "${OPENVPN_CONFIG}" 2>/dev/null || \
-     ! grep -Fqx 'pull-filter ignore "redirect-gateway"' "${OPENVPN_CONFIG}" 2>/dev/null || \
-     ! grep -Fqx 'auth-nocache' "${OPENVPN_CONFIG}" 2>/dev/null; then
-    backup_file "${OPENVPN_CONFIG}"
+  ensure_openvpn_keypass_source
+  if ! grep -Fqx 'route-nopull' "${PROFILE_OPENVPN_CONFIG}" 2>/dev/null || \
+     ! grep -Fqx 'pull-filter ignore "redirect-gateway"' "${PROFILE_OPENVPN_CONFIG}" 2>/dev/null || \
+     ! grep -Fqx 'auth-nocache' "${PROFILE_OPENVPN_CONFIG}" 2>/dev/null; then
+    backup_file "${PROFILE_OPENVPN_CONFIG}"
     ensure_openvpn_line 'route-nopull'
     ensure_openvpn_line 'pull-filter ignore "redirect-gateway"'
     ensure_openvpn_line 'auth-nocache'
   fi
 
-  if ! uci -q get "openvpn.${OPENVPN_SECTION}" >/dev/null 2>&1; then
-    uci set "openvpn.${OPENVPN_SECTION}=openvpn"
-    CHANGED=1
-    log "created openvpn section: ${OPENVPN_SECTION}"
+  if ! grep -q '^data-ciphers ' "${PROFILE_OPENVPN_CONFIG}" 2>/dev/null; then
+    backup_file "${PROFILE_OPENVPN_CONFIG}"
+    ensure_openvpn_line 'data-ciphers AES-128-CBC'
   fi
 
-  set_uci_value "openvpn.${OPENVPN_SECTION}.config" "${OPENVPN_CONFIG}"
-  set_uci_value "openvpn.${OPENVPN_SECTION}.enabled" "1"
+  if ! grep -q '^data-ciphers-fallback ' "${PROFILE_OPENVPN_CONFIG}" 2>/dev/null; then
+    backup_file "${PROFILE_OPENVPN_CONFIG}"
+    ensure_openvpn_line 'data-ciphers-fallback AES-128-CBC'
+  fi
+
+  if ! uci -q get "openvpn.${PROFILE_OPENVPN_SECTION}" >/dev/null 2>&1; then
+    uci set "openvpn.${PROFILE_OPENVPN_SECTION}=openvpn"
+    CHANGED=1
+    log "created openvpn section: ${PROFILE_OPENVPN_SECTION}"
+  fi
+
+  set_uci_value "openvpn.${PROFILE_OPENVPN_SECTION}.config" "${PROFILE_OPENVPN_CONFIG}"
+}
+
+normalize_profile() {
+  PROFILE_OPENVPN_SECTION="$1"
+  PROFILE_OPENVPN_CONFIG="$2"
+  [ -f "${PROFILE_OPENVPN_CONFIG}" ] || return 0
+
+  profile_dir="$(dirname "${PROFILE_OPENVPN_CONFIG}")"
+  profile_base="$(basename "${PROFILE_OPENVPN_CONFIG}" .ovpn)"
+  PROFILE_OPENVPN_AUTH_FILE="$(awk '/^auth-user-pass[[:space:]]+/ {print $2; exit}' "${PROFILE_OPENVPN_CONFIG}" 2>/dev/null || true)"
+  [ -n "${PROFILE_OPENVPN_AUTH_FILE}" ] || PROFILE_OPENVPN_AUTH_FILE="${profile_dir}/${profile_base}.auth"
+  PROFILE_OPENVPN_USERPASS_FALLBACK="${profile_dir}/${profile_base}.userpass"
+  [ -e "${PROFILE_OPENVPN_USERPASS_FALLBACK}" ] || PROFILE_OPENVPN_USERPASS_FALLBACK="$(dirname "${PROFILE_OPENVPN_AUTH_FILE}")/$(basename "${PROFILE_OPENVPN_AUTH_FILE}" .auth).userpass"
+  PROFILE_OPENVPN_KEYPASS_FILE="$(awk '/^askpass[[:space:]]+/ {print $2; exit}' "${PROFILE_OPENVPN_CONFIG}" 2>/dev/null || true)"
+  [ -n "${PROFILE_OPENVPN_KEYPASS_FILE}" ] || PROFILE_OPENVPN_KEYPASS_FILE="${profile_dir}/${profile_base}.keypass"
+  PROFILE_OPENVPN_KEYPASS_FALLBACK="${profile_dir}/${profile_base}.keypass"
+
+  if [ "${PROFILE_OPENVPN_SECTION}" = "${PRIMARY_OPENVPN_SECTION}" ]; then
+    [ -n "${PRIMARY_OPENVPN_AUTH_FILE}" ] && PROFILE_OPENVPN_AUTH_FILE="${PRIMARY_OPENVPN_AUTH_FILE}"
+    [ -n "${PRIMARY_OPENVPN_USERPASS_FALLBACK}" ] && PROFILE_OPENVPN_USERPASS_FALLBACK="${PRIMARY_OPENVPN_USERPASS_FALLBACK}"
+  elif [ ! -e "${PROFILE_OPENVPN_AUTH_FILE}" ] && [ -s "${PRIMARY_OPENVPN_AUTH_FILE}" ]; then
+    PROFILE_OPENVPN_USERPASS_FALLBACK="${PRIMARY_OPENVPN_AUTH_FILE}"
+  fi
+
+  if [ "${PROFILE_OPENVPN_SECTION}" = "${PRIMARY_OPENVPN_SECTION}" ]; then
+    primary_keypass_candidate="$(awk '/^askpass[[:space:]]+/ {print $2; exit}' "${PRIMARY_OPENVPN_CONFIG}" 2>/dev/null || true)"
+    [ -n "${primary_keypass_candidate}" ] && PRIMARY_OPENVPN_KEYPASS_FILE="${primary_keypass_candidate}"
+    if [ -z "${PRIMARY_OPENVPN_KEYPASS_FILE:-}" ]; then
+      PRIMARY_OPENVPN_KEYPASS_FILE="$(dirname "${PRIMARY_OPENVPN_CONFIG}")/$(basename "${PRIMARY_OPENVPN_CONFIG}" .ovpn).keypass"
+    fi
+    PROFILE_OPENVPN_KEYPASS_FALLBACK="${PRIMARY_OPENVPN_KEYPASS_FILE}"
+  elif [ ! -e "${PROFILE_OPENVPN_KEYPASS_FILE}" ] && [ -s "${PRIMARY_OPENVPN_KEYPASS_FILE:-}" ]; then
+    PROFILE_OPENVPN_KEYPASS_FALLBACK="${PRIMARY_OPENVPN_KEYPASS_FILE}"
+  fi
+
+  log "normalizing profile ${PROFILE_OPENVPN_SECTION} (${PROFILE_OPENVPN_CONFIG})"
+  ensure_openvpn_profile
+}
+
+normalize_all_profiles() {
+  processed_configs=""
+
+  if [ -n "${PRIMARY_OPENVPN_SECTION}" ] && [ -n "${PRIMARY_OPENVPN_CONFIG}" ]; then
+    normalize_profile "${PRIMARY_OPENVPN_SECTION}" "${PRIMARY_OPENVPN_CONFIG}"
+    processed_configs="$(append_unique_word "${processed_configs}" "${PRIMARY_OPENVPN_CONFIG}")"
+  fi
+
+  for section_name in $(list_uci_sections openvpn openvpn); do
+    config_value="$(uci -q get "openvpn.${section_name}.config" 2>/dev/null || true)"
+    [ -n "${config_value}" ] || continue
+    [ -f "${config_value}" ] || continue
+    case " ${processed_configs} " in
+      *" ${config_value} "*) continue ;;
+    esac
+    normalize_profile "${section_name}" "${config_value}"
+    processed_configs="$(append_unique_word "${processed_configs}" "${config_value}")"
+  done
+
+  for config_path in /etc/openvpn/*.ovpn; do
+    [ -f "${config_path}" ] || continue
+    case " ${processed_configs} " in
+      *" ${config_path} "*) continue ;;
+    esac
+    normalize_profile "$(basename "${config_path}" .ovpn)" "${config_path}"
+    processed_configs="$(append_unique_word "${processed_configs}" "${config_path}")"
+  done
 }
 
 ensure_network_binding() {
@@ -424,7 +560,7 @@ main() {
   require_cmd mv
 
   resolve_context
-  ensure_openvpn_profile
+  normalize_all_profiles
   ensure_network_binding
   ensure_passwall_paths
   patch_passwall_xray_generator

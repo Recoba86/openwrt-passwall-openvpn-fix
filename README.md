@@ -8,15 +8,18 @@ It is designed for the exact issue we diagnosed on OpenWrt routers that use Pass
 - Xray and nftables need the real kernel device name
 - after package updates, the patched Passwall2 generator can be overwritten
 
-The script auto-detects the running OpenVPN instance first, then enabled profiles, then falls back to the first usable profile. It also detects the config file, auth file path, tunnel device, and the Passwall `_iface` logical interface names. It re-applies the known-good fixes without changing your routing logic, shunt logic, domain policy, or outbound selection.
+The script auto-detects the running OpenVPN instance first, then enabled profiles, then falls back to the first usable profile. It also detects the config file, auth file path, tunnel device, and the Passwall `_iface` logical interface names. After it finds the primary profile, it normalizes every OpenVPN profile it can find under UCI and `/etc/openvpn/*.ovpn`, so imported profiles such as `sevom`, `246`, or future profile names are handled automatically.
 
 ## What It Changes
 
 - Ensures the OpenVPN profile keeps:
   - `auth-user-pass /etc/openvpn/<profile>.auth`
+  - `askpass /etc/openvpn/<profile>.keypass` when the private key is encrypted
   - `route-nopull`
   - `pull-filter ignore "redirect-gateway"`
   - `auth-nocache`
+  - `data-ciphers AES-128-CBC`
+  - `data-ciphers-fallback AES-128-CBC`
 - Ensures OpenWrt has:
   - `network.<passwall-iface>.proto='none'`
   - `network.<passwall-iface>.device='<detected tun/tap device>'`
