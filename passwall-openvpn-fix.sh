@@ -594,6 +594,11 @@ normalize_all_profiles() {
 }
 
 ensure_network_binding() {
+  if [ -z "${NETWORK_DEVICE}" ]; then
+    log "skipping network device binding because no tunnel device could be resolved"
+    return 0
+  fi
+
   for iface_name in ${PASSWALL_IFACES}; do
     if ! uci -q get "network.${iface_name}" >/dev/null 2>&1; then
       if [ "${DRY_RUN}" = "1" ]; then

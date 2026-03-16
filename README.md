@@ -58,6 +58,12 @@ If you want to apply the files without restarting services immediately:
 RESTART_SERVICES=0 wget -O- https://raw.githubusercontent.com/Recoba86/openwrt-passwall-openvpn-fix/main/install.sh | sh
 ```
 
+If you only want to preview what the installer would change:
+
+```sh
+wget -O- https://raw.githubusercontent.com/Recoba86/openwrt-passwall-openvpn-fix/main/install.sh | sh -s -- --dry-run
+```
+
 ## Usage
 
 Copy the script to the router and run it as `root`.
@@ -81,11 +87,7 @@ To preview changes without modifying files, UCI, or services:
 ssh root@192.168.10.1 'sh /root/passwall-openvpn-fix.sh --dry-run'
 ```
 
-The one-line installer also supports dry-run mode:
-
-```sh
-wget -O- https://raw.githubusercontent.com/Recoba86/openwrt-passwall-openvpn-fix/main/install.sh | sh -s -- --dry-run
-```
+If the tunnel is currently down and the router has no existing `network.<iface>.device` binding yet, dry-run will report that it cannot preview the final network rebinding until a live tunnel exists or `NETWORK_DEVICE` is provided explicitly.
 
 ## Customization
 
