@@ -24,6 +24,7 @@ PRIMARY_OPENVPN_CONFIG=""
 PRIMARY_OPENVPN_AUTH_FILE=""
 PRIMARY_OPENVPN_USERPASS_FALLBACK=""
 PRIMARY_OPENVPN_KEYPASS_FILE=""
+NETWORK_DEVICE_WAIT_SECONDS="${NETWORK_DEVICE_WAIT_SECONDS:-15}"
 
 log() {
   printf '%s %s\n' "${LOG_PREFIX}" "$*"
@@ -177,21 +178,80 @@ detect_openvpn_userpass_fallback() {
   PRIMARY_OPENVPN_USERPASS_FALLBACK="${config_dir}/${config_base}.userpass"
 }
 
-detect_network_device() {
-  [ -n "${NETWORK_DEVICE}" ] && return 0
-
-  active_device="$(ip -brief addr show 2>/dev/null | awk '$1 ~ /^(tun|tap)[0-9]+$/ {print $1; exit}')"
-  if [ -n "${active_device}" ]; then
-    NETWORK_DEVICE="${active_device}"
+get_openvpn_dev_hint() {
+  dev_value="$(uci -q get "openvpn.${PRIMARY_OPENVPN_SECTION}.dev" 2>/dev/null || true)"
+  if [ -n "${dev_value}" ]; then
+    printf '%s\n' "${dev_value}"
     return 0
   fi
 
-  config_dev="$(awk '/^dev[[:space:]]+/ {print $2; exit}' "${PRIMARY_OPENVPN_CONFIG}" 2>/dev/null || true)"
-  case "${config_dev}" in
-    tap|tap*) NETWORK_DEVICE="tap0" ;;
-    ""|tun|tun*) NETWORK_DEVICE="tun0" ;;
-    *) NETWORK_DEVICE="${config_dev}" ;;
-  esac
+  awk '/^dev[[:space:]]+/ {print $2; exit}' "${PRIMARY_OPENVPN_CONFIG}" 2>/dev/null || true
+}
+
+probe_network_device() {
+  preferred_device="$(get_openvpn_dev_hint)"
+
+  if [ -n "${NETWORK_IFACE}" ]; then
+    existing_device="$(uci -q get "network.${NETWORK_IFACE}.device" 2>/dev/null || true)"
+    if [ -n "${existing_device}" ]; then
+      printf '%s\n' "${existing_device}"
+      return 0
+    fi
+  fi
+
+  for iface_name in ${PASSWALL_IFACES}; do
+    existing_device="$(uci -q get "network.${iface_name}.device" 2>/dev/null || true)"
+    if [ -n "${existing_device}" ]; then
+      printf '%s\n' "${existing_device}"
+      return 0
+    fi
+  done
+
+  if [ -n "${preferred_device}" ] && [ "${preferred_device}" != "tun" ] && [ "${preferred_device}" != "tap" ]; then
+    if ip -o link show "${preferred_device}" >/dev/null 2>&1; then
+      printf '%s\n' "${preferred_device}"
+      return 0
+    fi
+  fi
+
+  active_device="$(ip -o link show 2>/dev/null | awk -F': ' '$2 ~ /^(tun|tap)[0-9]+$/ {print $2; exit}')"
+  if [ -n "${active_device}" ]; then
+    printf '%s\n' "${active_device}"
+    return 0
+  fi
+
+  if [ -n "${preferred_device}" ] && [ "${preferred_device}" != "tun" ] && [ "${preferred_device}" != "tap" ]; then
+    printf '%s\n' "${preferred_device}"
+    return 0
+  fi
+}
+
+detect_network_device() {
+  [ -n "${NETWORK_DEVICE}" ] && return 0
+
+  detected_device="$(probe_network_device)"
+  if [ -n "${detected_device}" ]; then
+    NETWORK_DEVICE="${detected_device}"
+    return 0
+  fi
+
+  fail "could not detect the OpenVPN tunnel device automatically; bring the tunnel up once or set NETWORK_DEVICE explicitly"
+}
+
+wait_for_network_device() {
+  [ -n "${NETWORK_DEVICE}" ] && return 0
+
+  remaining_seconds="${NETWORK_DEVICE_WAIT_SECONDS}"
+  while [ "${remaining_seconds}" -gt 0 ]; do
+    detected_device="$(probe_network_device)"
+    if [ -n "${detected_device}" ]; then
+      NETWORK_DEVICE="${detected_device}"
+      log "detected tunnel device after restart: ${NETWORK_DEVICE}"
+      return 0
+    fi
+    sleep 1
+    remaining_seconds=$((remaining_seconds - 1))
+  done
 }
 
 detect_passwall_ifaces() {
@@ -218,14 +278,14 @@ detect_network_iface() {
 
   for iface_name in $(list_uci_sections network interface); do
     device_value="$(uci -q get "network.${iface_name}.device" 2>/dev/null || true)"
-    if [ "${device_value}" = "${NETWORK_DEVICE}" ]; then
+    if [ -n "${NETWORK_DEVICE}" ] && [ "${device_value}" = "${NETWORK_DEVICE}" ]; then
       NETWORK_IFACE="${iface_name}"
       PASSWALL_IFACES="$(append_unique_word "${PASSWALL_IFACES}" "${iface_name}")"
       return 0
     fi
   done
 
-  NETWORK_IFACE="${OPENVPN_SECTION}"
+  NETWORK_IFACE="${PRIMARY_OPENVPN_SECTION}"
   PASSWALL_IFACES="$(append_unique_word "${PASSWALL_IFACES}" "${NETWORK_IFACE}")"
 }
 
@@ -235,14 +295,18 @@ resolve_context() {
   [ -f "${PRIMARY_OPENVPN_CONFIG}" ] || fail "OpenVPN config not found: ${PRIMARY_OPENVPN_CONFIG}"
   detect_openvpn_auth_source
   detect_openvpn_userpass_fallback
-  detect_network_device
   detect_passwall_ifaces
+  NETWORK_DEVICE="$(probe_network_device)"
   detect_network_iface
 
   log "detected OpenVPN section: ${PRIMARY_OPENVPN_SECTION}"
   log "detected OpenVPN config: ${PRIMARY_OPENVPN_CONFIG}"
   log "detected auth file: ${PRIMARY_OPENVPN_AUTH_FILE}"
-  log "detected tunnel device: ${NETWORK_DEVICE}"
+  if [ -n "${NETWORK_DEVICE}" ]; then
+    log "detected tunnel device: ${NETWORK_DEVICE}"
+  else
+    log "tunnel device not detected yet; it will be resolved from the live tunnel or existing network binding"
+  fi
   log "detected network iface(s): ${PASSWALL_IFACES}"
 }
 
@@ -536,17 +600,25 @@ EOF
   fi
 }
 
-commit_changes() {
+commit_openvpn_and_passwall() {
   uci commit openvpn
-  uci commit network
   uci commit "${PASSWALL_PACKAGE}"
 }
 
-restart_services() {
+commit_network() {
+  uci commit network
+}
+
+restart_openvpn() {
   [ "${RESTART_SERVICES}" = "1" ] || return 0
 
   log "restarting openvpn"
   /etc/init.d/openvpn restart
+  wait_for_network_device
+}
+
+restart_passwall() {
+  [ "${RESTART_SERVICES}" = "1" ] || return 0
 
   log "restarting passwall2"
   /etc/init.d/passwall2 restart
@@ -561,11 +633,14 @@ main() {
 
   resolve_context
   normalize_all_profiles
-  ensure_network_binding
   ensure_passwall_paths
   patch_passwall_xray_generator
-  commit_changes
-  restart_services
+  commit_openvpn_and_passwall
+  restart_openvpn
+  detect_network_device
+  ensure_network_binding
+  commit_network
+  restart_passwall
 
   if [ "${CHANGED}" = "1" ]; then
     log "completed successfully"
