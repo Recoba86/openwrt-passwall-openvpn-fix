@@ -15,3 +15,10 @@ bruteForce/
 # Temporary runtime files
 *.tmp
 *.bak.*
+
+# Tracked test fixtures
+!tests/
+!tests/README.md
+!tests/fixture-audit.sh
+!tests/fixtures/
+!tests/fixtures/*.ovpn
