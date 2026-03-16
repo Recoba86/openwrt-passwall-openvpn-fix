@@ -8,18 +8,17 @@ It is designed for the exact issue we diagnosed on OpenWrt routers that use Pass
 - Xray and nftables need the real kernel device name
 - after package updates, the patched Passwall2 generator can be overwritten
 
-The script auto-detects the running OpenVPN instance first, then enabled LuCI/UCI profiles, then falls back to the first usable profile. It detects the config file, auth file path, live tunnel device, and the Passwall `_iface` logical interface names. After it finds the primary profile, it normalizes every OpenVPN profile it can find under LuCI/UCI and `/etc/openvpn/*.ovpn`, so it works with arbitrary profile names instead of router-specific names.
+The script auto-detects the running OpenVPN instance first, then enabled LuCI/UCI profiles, then falls back to the first usable profile. It detects the config file, auth file path, live tunnel device, and the Passwall `_iface` logical interface names. After it finds the primary profile, it normalizes every OpenVPN profile it can find under LuCI/UCI and `/etc/openvpn/*.ovpn`, while preserving each profile's own auth and cipher model instead of forcing one fixed template.
 
 ## What It Changes
 
 - Ensures the OpenVPN profile keeps:
-  - `auth-user-pass /etc/openvpn/<profile>.auth`
-  - `askpass /etc/openvpn/<profile>.keypass` when the private key is encrypted
+  - `auth-user-pass /etc/openvpn/<profile>.auth` only when the profile already uses `auth-user-pass`
+  - `askpass /etc/openvpn/<profile>.keypass` only when the private key is encrypted
   - `route-nopull`
   - `pull-filter ignore "redirect-gateway"`
   - `auth-nocache`
-  - `data-ciphers AES-128-CBC`
-  - `data-ciphers-fallback AES-128-CBC`
+  - `data-ciphers` and `data-ciphers-fallback` derived from the profile's own existing `cipher` or `data-ciphers` settings
 - Ensures OpenWrt has:
   - `network.<passwall-iface>.proto='none'`
   - `network.<passwall-iface>.device='<detected tun/tap device>'`
@@ -35,6 +34,8 @@ The script auto-detects the running OpenVPN instance first, then enabled LuCI/UC
 - shunt rules
 - geosite/domain policy
 - node selection
+- a profile's original auth mode
+- a profile's original cipher family unless compatibility metadata is missing or duplicated
 - your OpenVPN server/certificate settings
 
 ## One-Line Install
@@ -105,6 +106,15 @@ sh ./passwall-openvpn-fix.sh
 ```
 
 When the OpenVPN profile uses a generic `dev tun` or `dev tap`, the script now learns the real kernel device from the live router state instead of assuming a fixed device name. During the normal installer flow this happens automatically after OpenVPN restarts.
+
+The normalization is profile-aware:
+
+- profiles that already use `auth-user-pass` are rewritten to use an explicit per-profile auth file path
+- profiles that do not use `auth-user-pass` are left certificate-only
+- encrypted private keys get an `askpass` path, unencrypted keys do not
+- legacy `cipher` settings are used to derive OpenVPN 2.5+ `data-ciphers` compatibility when needed
+- duplicate or conflicting compatibility directives are collapsed to one canonical profile-specific value
+- secret fallbacks are no longer copied from one profile into another
 
 ## Recommended Next Step
 
