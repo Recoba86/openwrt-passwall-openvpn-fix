@@ -28,3 +28,11 @@ Use the fixture audit script to validate that the fixture set still covers those
 ```sh
 sh ./tests/fixture-audit.sh
 ```
+
+Use the normalization outcome script to run the fixer logic against a temporary sandbox and assert the expected per-profile results:
+
+```sh
+sh ./tests/normalize-fixture-outcomes.sh
+```
+
+That second script also includes a synthetic dirty-profile case with duplicate conflicting compatibility directives, so the real cleanup path is exercised as well.
