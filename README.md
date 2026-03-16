@@ -75,6 +75,18 @@ To restart OpenVPN and Passwall2 automatically after patching:
 ssh root@192.168.10.1 'RESTART_SERVICES=1 sh /root/passwall-openvpn-fix.sh'
 ```
 
+To preview changes without modifying files, UCI, or services:
+
+```sh
+ssh root@192.168.10.1 'sh /root/passwall-openvpn-fix.sh --dry-run'
+```
+
+The one-line installer also supports dry-run mode:
+
+```sh
+wget -O- https://raw.githubusercontent.com/Recoba86/openwrt-passwall-openvpn-fix/main/install.sh | sh -s -- --dry-run
+```
+
 ## Customization
 
 The script is meant to work without manual edits, but you can still override detection with environment variables when needed:

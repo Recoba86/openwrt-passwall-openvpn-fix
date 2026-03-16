@@ -36,6 +36,6 @@ download_file
 chmod 755 "${INSTALL_PATH}"
 
 log "running ${INSTALL_PATH}"
-RESTART_SERVICES="${RESTART_SERVICES}" sh "${INSTALL_PATH}"
+RESTART_SERVICES="${RESTART_SERVICES}" sh "${INSTALL_PATH}" "$@"
 
 log "completed"

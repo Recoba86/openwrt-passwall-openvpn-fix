@@ -15,6 +15,7 @@ PASSWALL_PACKAGE="${PASSWALL_PACKAGE:-passwall2}"
 PASSWALL_XRAY_LUA="${PASSWALL_XRAY_LUA:-/usr/lib/lua/luci/passwall2/util_xray.lua}"
 PASSWALL_XRAY_BIN="${PASSWALL_XRAY_BIN:-/usr/bin/xray}"
 RESTART_SERVICES="${RESTART_SERVICES:-0}"
+DRY_RUN="${DRY_RUN:-0}"
 
 CHANGED=0
 BACKED_UP_FILES=""
@@ -43,6 +44,33 @@ require_cmd() {
   command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
 }
 
+parse_args() {
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --dry-run)
+        DRY_RUN=1
+        ;;
+      --help|-h)
+        cat <<'EOF'
+Usage: passwall-openvpn-fix.sh [--dry-run]
+
+Options:
+  --dry-run  Report what would change without modifying files, UCI, or services.
+EOF
+        exit 0
+        ;;
+      *)
+        fail "unknown argument: $1"
+        ;;
+    esac
+    shift
+  done
+}
+
+mark_changed() {
+  CHANGED=1
+}
+
 list_uci_sections() {
   package_name="$1"
   type_name="$2"
@@ -69,6 +97,12 @@ backup_file() {
     *" ${file_path} "*) return 0 ;;
   esac
   backup_path="${file_path}.bak.$(date +%Y%m%d%H%M%S)"
+  if [ "${DRY_RUN}" = "1" ]; then
+    mark_changed
+    BACKED_UP_FILES="${BACKED_UP_FILES} ${file_path}"
+    log "would create backup: ${backup_path}"
+    return 0
+  fi
   cp "${file_path}" "${backup_path}"
   BACKED_UP_FILES="${BACKED_UP_FILES} ${file_path}"
   log "backup created: ${backup_path}"
@@ -79,8 +113,13 @@ set_uci_value() {
   expected="$2"
   current="$(uci -q get "${key}" 2>/dev/null || true)"
   if [ "${current}" != "${expected}" ]; then
+    if [ "${DRY_RUN}" = "1" ]; then
+      mark_changed
+      log "would set ${key}='${expected}'"
+      return 0
+    fi
     uci set "${key}=${expected}"
-    CHANGED=1
+    mark_changed
     log "set ${key}='${expected}'"
   fi
 }
@@ -235,6 +274,11 @@ detect_network_device() {
     return 0
   fi
 
+  if [ "${DRY_RUN}" = "1" ]; then
+    log "could not detect the OpenVPN tunnel device in dry-run mode; a live tunnel or explicit NETWORK_DEVICE is required to preview network rebinding"
+    return 0
+  fi
+
   fail "could not detect the OpenVPN tunnel device automatically; bring the tunnel up once or set NETWORK_DEVICE explicitly"
 }
 
@@ -313,43 +357,73 @@ resolve_context() {
 ensure_openvpn_line() {
   line="$1"
   grep -Fqx "${line}" "${PROFILE_OPENVPN_CONFIG}" 2>/dev/null && return 0
+  if [ "${DRY_RUN}" = "1" ]; then
+    mark_changed
+    log "would add to ${PROFILE_OPENVPN_CONFIG}: ${line}"
+    return 0
+  fi
   printf '\n%s\n' "${line}" >> "${PROFILE_OPENVPN_CONFIG}"
-  CHANGED=1
+  mark_changed
   log "added to ${PROFILE_OPENVPN_CONFIG}: ${line}"
 }
 
 ensure_openvpn_auth_source() {
   if [ ! -e "${PROFILE_OPENVPN_AUTH_FILE}" ]; then
     if [ -s "${PROFILE_OPENVPN_USERPASS_FALLBACK}" ]; then
-      cp "${PROFILE_OPENVPN_USERPASS_FALLBACK}" "${PROFILE_OPENVPN_AUTH_FILE}"
-      chmod 600 "${PROFILE_OPENVPN_AUTH_FILE}"
-      CHANGED=1
-      log "created ${PROFILE_OPENVPN_AUTH_FILE} from ${PROFILE_OPENVPN_USERPASS_FALLBACK}"
+      if [ "${DRY_RUN}" = "1" ]; then
+        mark_changed
+        log "would create ${PROFILE_OPENVPN_AUTH_FILE} from ${PROFILE_OPENVPN_USERPASS_FALLBACK}"
+      else
+        cp "${PROFILE_OPENVPN_USERPASS_FALLBACK}" "${PROFILE_OPENVPN_AUTH_FILE}"
+        chmod 600 "${PROFILE_OPENVPN_AUTH_FILE}"
+        mark_changed
+        log "created ${PROFILE_OPENVPN_AUTH_FILE} from ${PROFILE_OPENVPN_USERPASS_FALLBACK}"
+      fi
     else
-      : > "${PROFILE_OPENVPN_AUTH_FILE}"
-      chmod 600 "${PROFILE_OPENVPN_AUTH_FILE}"
-      CHANGED=1
-      log "created empty auth file ${PROFILE_OPENVPN_AUTH_FILE}"
+      if [ "${DRY_RUN}" = "1" ]; then
+        mark_changed
+        log "would create empty auth file ${PROFILE_OPENVPN_AUTH_FILE}"
+      else
+        : > "${PROFILE_OPENVPN_AUTH_FILE}"
+        chmod 600 "${PROFILE_OPENVPN_AUTH_FILE}"
+        mark_changed
+        log "created empty auth file ${PROFILE_OPENVPN_AUTH_FILE}"
+      fi
     fi
   fi
 
   if grep -q '^auth-user-pass ' "${PROFILE_OPENVPN_CONFIG}" 2>/dev/null; then
     if ! grep -q "^auth-user-pass ${PROFILE_OPENVPN_AUTH_FILE}\$" "${PROFILE_OPENVPN_CONFIG}" 2>/dev/null; then
       backup_file "${PROFILE_OPENVPN_CONFIG}"
-      sed -i "s#^auth-user-pass .*#auth-user-pass ${PROFILE_OPENVPN_AUTH_FILE}#" "${PROFILE_OPENVPN_CONFIG}"
-      CHANGED=1
-      log "set auth-user-pass source to ${PROFILE_OPENVPN_AUTH_FILE}"
+      if [ "${DRY_RUN}" = "1" ]; then
+        mark_changed
+        log "would set auth-user-pass source to ${PROFILE_OPENVPN_AUTH_FILE}"
+      else
+        sed -i "s#^auth-user-pass .*#auth-user-pass ${PROFILE_OPENVPN_AUTH_FILE}#" "${PROFILE_OPENVPN_CONFIG}"
+        mark_changed
+        log "set auth-user-pass source to ${PROFILE_OPENVPN_AUTH_FILE}"
+      fi
     fi
   elif grep -q '^auth-user-pass$' "${PROFILE_OPENVPN_CONFIG}" 2>/dev/null; then
     backup_file "${PROFILE_OPENVPN_CONFIG}"
-    sed -i "s#^auth-user-pass\$#auth-user-pass ${PROFILE_OPENVPN_AUTH_FILE}#" "${PROFILE_OPENVPN_CONFIG}"
-    CHANGED=1
-    log "set auth-user-pass source to ${PROFILE_OPENVPN_AUTH_FILE}"
+    if [ "${DRY_RUN}" = "1" ]; then
+      mark_changed
+      log "would set auth-user-pass source to ${PROFILE_OPENVPN_AUTH_FILE}"
+    else
+      sed -i "s#^auth-user-pass\$#auth-user-pass ${PROFILE_OPENVPN_AUTH_FILE}#" "${PROFILE_OPENVPN_CONFIG}"
+      mark_changed
+      log "set auth-user-pass source to ${PROFILE_OPENVPN_AUTH_FILE}"
+    fi
   else
     backup_file "${PROFILE_OPENVPN_CONFIG}"
-    printf '\nauth-user-pass %s\n' "${PROFILE_OPENVPN_AUTH_FILE}" >> "${PROFILE_OPENVPN_CONFIG}"
-    CHANGED=1
-    log "added auth-user-pass source ${PROFILE_OPENVPN_AUTH_FILE}"
+    if [ "${DRY_RUN}" = "1" ]; then
+      mark_changed
+      log "would add auth-user-pass source ${PROFILE_OPENVPN_AUTH_FILE}"
+    else
+      printf '\nauth-user-pass %s\n' "${PROFILE_OPENVPN_AUTH_FILE}" >> "${PROFILE_OPENVPN_CONFIG}"
+      mark_changed
+      log "added auth-user-pass source ${PROFILE_OPENVPN_AUTH_FILE}"
+    fi
   fi
 }
 
@@ -359,36 +433,61 @@ ensure_openvpn_keypass_source() {
   fi
 
   if [ ! -e "${PROFILE_OPENVPN_KEYPASS_FILE}" ] && [ -s "${PROFILE_OPENVPN_KEYPASS_FALLBACK}" ]; then
-    cp "${PROFILE_OPENVPN_KEYPASS_FALLBACK}" "${PROFILE_OPENVPN_KEYPASS_FILE}"
-    chmod 600 "${PROFILE_OPENVPN_KEYPASS_FILE}"
-    CHANGED=1
-    log "created ${PROFILE_OPENVPN_KEYPASS_FILE} from ${PROFILE_OPENVPN_KEYPASS_FALLBACK}"
+    if [ "${DRY_RUN}" = "1" ]; then
+      mark_changed
+      log "would create ${PROFILE_OPENVPN_KEYPASS_FILE} from ${PROFILE_OPENVPN_KEYPASS_FALLBACK}"
+    else
+      cp "${PROFILE_OPENVPN_KEYPASS_FALLBACK}" "${PROFILE_OPENVPN_KEYPASS_FILE}"
+      chmod 600 "${PROFILE_OPENVPN_KEYPASS_FILE}"
+      mark_changed
+      log "created ${PROFILE_OPENVPN_KEYPASS_FILE} from ${PROFILE_OPENVPN_KEYPASS_FALLBACK}"
+    fi
   fi
 
   if [ ! -e "${PROFILE_OPENVPN_KEYPASS_FILE}" ]; then
-    : > "${PROFILE_OPENVPN_KEYPASS_FILE}"
-    chmod 600 "${PROFILE_OPENVPN_KEYPASS_FILE}"
-    CHANGED=1
-    log "created empty keypass file ${PROFILE_OPENVPN_KEYPASS_FILE}"
+    if [ "${DRY_RUN}" = "1" ]; then
+      mark_changed
+      log "would create empty keypass file ${PROFILE_OPENVPN_KEYPASS_FILE}"
+    else
+      : > "${PROFILE_OPENVPN_KEYPASS_FILE}"
+      chmod 600 "${PROFILE_OPENVPN_KEYPASS_FILE}"
+      mark_changed
+      log "created empty keypass file ${PROFILE_OPENVPN_KEYPASS_FILE}"
+    fi
   fi
 
   if grep -q '^askpass ' "${PROFILE_OPENVPN_CONFIG}" 2>/dev/null; then
     if ! grep -q "^askpass ${PROFILE_OPENVPN_KEYPASS_FILE}\$" "${PROFILE_OPENVPN_CONFIG}" 2>/dev/null; then
       backup_file "${PROFILE_OPENVPN_CONFIG}"
-      sed -i "s#^askpass .*#askpass ${PROFILE_OPENVPN_KEYPASS_FILE}#" "${PROFILE_OPENVPN_CONFIG}"
-      CHANGED=1
-      log "set askpass source to ${PROFILE_OPENVPN_KEYPASS_FILE}"
+      if [ "${DRY_RUN}" = "1" ]; then
+        mark_changed
+        log "would set askpass source to ${PROFILE_OPENVPN_KEYPASS_FILE}"
+      else
+        sed -i "s#^askpass .*#askpass ${PROFILE_OPENVPN_KEYPASS_FILE}#" "${PROFILE_OPENVPN_CONFIG}"
+        mark_changed
+        log "set askpass source to ${PROFILE_OPENVPN_KEYPASS_FILE}"
+      fi
     fi
   elif grep -q '^askpass$' "${PROFILE_OPENVPN_CONFIG}" 2>/dev/null; then
     backup_file "${PROFILE_OPENVPN_CONFIG}"
-    sed -i "s#^askpass\$#askpass ${PROFILE_OPENVPN_KEYPASS_FILE}#" "${PROFILE_OPENVPN_CONFIG}"
-    CHANGED=1
-    log "set askpass source to ${PROFILE_OPENVPN_KEYPASS_FILE}"
+    if [ "${DRY_RUN}" = "1" ]; then
+      mark_changed
+      log "would set askpass source to ${PROFILE_OPENVPN_KEYPASS_FILE}"
+    else
+      sed -i "s#^askpass\$#askpass ${PROFILE_OPENVPN_KEYPASS_FILE}#" "${PROFILE_OPENVPN_CONFIG}"
+      mark_changed
+      log "set askpass source to ${PROFILE_OPENVPN_KEYPASS_FILE}"
+    fi
   else
     backup_file "${PROFILE_OPENVPN_CONFIG}"
-    printf '\naskpass %s\n' "${PROFILE_OPENVPN_KEYPASS_FILE}" >> "${PROFILE_OPENVPN_CONFIG}"
-    CHANGED=1
-    log "added askpass source ${PROFILE_OPENVPN_KEYPASS_FILE}"
+    if [ "${DRY_RUN}" = "1" ]; then
+      mark_changed
+      log "would add askpass source ${PROFILE_OPENVPN_KEYPASS_FILE}"
+    else
+      printf '\naskpass %s\n' "${PROFILE_OPENVPN_KEYPASS_FILE}" >> "${PROFILE_OPENVPN_CONFIG}"
+      mark_changed
+      log "added askpass source ${PROFILE_OPENVPN_KEYPASS_FILE}"
+    fi
   fi
 }
 
@@ -415,9 +514,14 @@ ensure_openvpn_profile() {
   fi
 
   if ! uci -q get "openvpn.${PROFILE_OPENVPN_SECTION}" >/dev/null 2>&1; then
-    uci set "openvpn.${PROFILE_OPENVPN_SECTION}=openvpn"
-    CHANGED=1
-    log "created openvpn section: ${PROFILE_OPENVPN_SECTION}"
+    if [ "${DRY_RUN}" = "1" ]; then
+      mark_changed
+      log "would create openvpn section: ${PROFILE_OPENVPN_SECTION}"
+    else
+      uci set "openvpn.${PROFILE_OPENVPN_SECTION}=openvpn"
+      mark_changed
+      log "created openvpn section: ${PROFILE_OPENVPN_SECTION}"
+    fi
   fi
 
   set_uci_value "openvpn.${PROFILE_OPENVPN_SECTION}.config" "${PROFILE_OPENVPN_CONFIG}"
@@ -492,9 +596,14 @@ normalize_all_profiles() {
 ensure_network_binding() {
   for iface_name in ${PASSWALL_IFACES}; do
     if ! uci -q get "network.${iface_name}" >/dev/null 2>&1; then
-      uci set "network.${iface_name}=interface"
-      CHANGED=1
-      log "created network interface section: ${iface_name}"
+      if [ "${DRY_RUN}" = "1" ]; then
+        mark_changed
+        log "would create network interface section: ${iface_name}"
+      else
+        uci set "network.${iface_name}=interface"
+        mark_changed
+        log "created network interface section: ${iface_name}"
+      fi
     fi
 
     set_uci_value "network.${iface_name}.proto" "none"
@@ -511,8 +620,9 @@ ensure_passwall_paths() {
 patch_passwall_xray_generator() {
   [ -f "${PASSWALL_XRAY_LUA}" ] || fail "Passwall xray generator not found: ${PASSWALL_XRAY_LUA}"
   patch_state="$(
-    lua - "${PASSWALL_XRAY_LUA}" <<'EOF'
+    lua - "${PASSWALL_XRAY_LUA}" "${DRY_RUN}" <<'EOF'
 local path = arg[1]
+local dry_run = arg[2] == "1"
 local f = assert(io.open(path, "r"))
 local source = f:read("*a")
 f:close()
@@ -578,9 +688,11 @@ local compile = loadstring or load
 assert(compile(source), "generated util_xray.lua is invalid")
 
 if source ~= original then
-  local out = assert(io.open(path .. ".tmp", "w"))
-  out:write(source)
-  out:close()
+  if not dry_run then
+    local out = assert(io.open(path .. ".tmp", "w"))
+    out:write(source)
+    out:close()
+  end
   print("changed")
 else
   print("unchanged")
@@ -590,27 +702,44 @@ EOF
 
   if [ "${patch_state}" = "changed" ]; then
     backup_file "${PASSWALL_XRAY_LUA}"
-    mv "${PASSWALL_XRAY_LUA}.tmp" "${PASSWALL_XRAY_LUA}"
-    cp "${PASSWALL_XRAY_LUA}" "${PASSWALL_XRAY_LUA}.last-applied"
-    CHANGED=1
-    log "patched ${PASSWALL_XRAY_LUA}"
+    if [ "${DRY_RUN}" = "1" ]; then
+      mark_changed
+      log "would patch ${PASSWALL_XRAY_LUA}"
+    else
+      mv "${PASSWALL_XRAY_LUA}.tmp" "${PASSWALL_XRAY_LUA}"
+      cp "${PASSWALL_XRAY_LUA}" "${PASSWALL_XRAY_LUA}.last-applied"
+      mark_changed
+      log "patched ${PASSWALL_XRAY_LUA}"
+    fi
   else
-    rm -f "${PASSWALL_XRAY_LUA}.tmp"
+    [ "${DRY_RUN}" = "1" ] || rm -f "${PASSWALL_XRAY_LUA}.tmp"
     log "${PASSWALL_XRAY_LUA} already patched"
   fi
 }
 
 commit_openvpn_and_passwall() {
+  if [ "${DRY_RUN}" = "1" ]; then
+    log "would commit UCI changes: openvpn, ${PASSWALL_PACKAGE}"
+    return 0
+  fi
   uci commit openvpn
   uci commit "${PASSWALL_PACKAGE}"
 }
 
 commit_network() {
+  if [ "${DRY_RUN}" = "1" ]; then
+    log "would commit UCI changes: network"
+    return 0
+  fi
   uci commit network
 }
 
 restart_openvpn() {
   [ "${RESTART_SERVICES}" = "1" ] || return 0
+  if [ "${DRY_RUN}" = "1" ]; then
+    log "would restart openvpn"
+    return 0
+  fi
 
   log "restarting openvpn"
   /etc/init.d/openvpn restart
@@ -619,12 +748,17 @@ restart_openvpn() {
 
 restart_passwall() {
   [ "${RESTART_SERVICES}" = "1" ] || return 0
+  if [ "${DRY_RUN}" = "1" ]; then
+    log "would restart passwall2"
+    return 0
+  fi
 
   log "restarting passwall2"
   /etc/init.d/passwall2 restart
 }
 
 main() {
+  parse_args "$@"
   require_root
   require_cmd uci
   require_cmd lua
@@ -643,12 +777,22 @@ main() {
   restart_passwall
 
   if [ "${CHANGED}" = "1" ]; then
-    log "completed successfully"
+    if [ "${DRY_RUN}" = "1" ]; then
+      log "dry-run completed; changes were not applied"
+    else
+      log "completed successfully"
+    fi
   else
-    log "nothing changed"
+    if [ "${DRY_RUN}" = "1" ]; then
+      log "dry-run completed; nothing would change"
+    else
+      log "nothing changed"
+    fi
   fi
 
-  if [ "${RESTART_SERVICES}" != "1" ]; then
+  if [ "${DRY_RUN}" = "1" ]; then
+    log "dry-run mode skipped file writes, UCI commits, and service restarts"
+  elif [ "${RESTART_SERVICES}" != "1" ]; then
     log "restarts were skipped; set RESTART_SERVICES=1 to restart openvpn and passwall2 automatically"
   fi
 }
